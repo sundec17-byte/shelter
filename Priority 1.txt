@@ -1,0 +1,416 @@
+Supporting Documents:
+/Example Of Issues
+Captcha - Bot Detection to be fixes in Task 1
+misplaced overlay - 2 images showing how additional cropping is resulting in disconnected result to be fixed in Task 3
+/Images Examples for 440px overlay to be applied in Task 3
+
+***Priority/Task 1****
+We are encountering escalating bot detection / CAPTCHA triggering from PhotoShelter while processing pre-discovered image IDs through direct `img-get2` requests.
+
+first address issue
+
+add rate limit
+resolve bot detection
+
+attachment screenshot this is a dynamic example only
+https://captcha.photoshelter.com/index.php?origurl=https%3A%2F%2Falphapress.photoshelter.com%2Fsearch&urlsig=1778701540:9455731f3bb45c32f9b7c4c01968fdc488fd156386d846838762b94c1386865542bdcf08007624cd71e60dc487136840a699ea292f82446f0b2c373e5eae058da4b10e5a30cf19122e2d02ddfab0005ad4f5e8e07f7ebb146f65356d53e249c880c444fe1a5bcc2f9d92b11327bb3d10aa43255742449de066264271ac5ac061b0d612a7ad5b56a369f80d2769691278ce4248438f9fa68abd92ef782e281ce82dd48781edbe8326ed98869f12f448333651da728e17761f351bd0883aac4290d7f7f8a5249aa940f558899c3058792e508aed83519f4c39aadf872321037164fa0db8e0f00d5f96051ae96c8971a9b2f8f3b59281e3567838f7f96e9b6f537e
+
+doesn't like non redirected capture e.g https://captcha.photoshelter.com/ 
+Redirection state lost
+
+Sorry, no forwarding destination was found in your request. This may occur if you
+return to this page via the "Back" button.
+
+Please retry your original request.
+
+
+when confirmation implementation
+
+The script scraped the webpage for exif information 
+
+
+Current architecture:
+
+* IDs are already known beforehand
+* Metadata is extracted locally from embedded IPTC blocks inside:
+
+  * `crop=999999x2040`
+* Composite generation uses:
+
+  * `crop=999999x2040`
+  * `fit=9999`
+* Current implementation uses:
+
+  * Python `urllib.request`
+  * Node `fetch()`
+* Requests are currently stateless and machine-like
+
+Important finding:
+The current CAPTCHA escalation is likely behavioural rather than endpoint-specific.
+
+The workflow now resembles:
+
+* repeated direct image fetches
+* perfectly regular cadence
+* no session persistence
+* no browser state continuity
+* no cookie reuse
+
+This likely creates a strong automation fingerprint.
+
+Observed CAPTCHA behaviour:
+
+* Redirects to:
+  `https://captcha.photoshelter.com/index.php?...`
+* CAPTCHA state only works when triggered naturally through the original browser session
+* Direct visits to captcha URLs fail because forwarding state is missing
+* This strongly suggests session-bound anti-bot scoring
+
+Required architectural changes:
+
+---
+
+## 1 — Persistent Cookie Session
+
+Implement persistent cookie handling for all Python download requests.
+
+Current:
+
+```python
+urllib.request.urlopen(req)
+```
+
+Required:
+
+* persistent cookie jar
+* cookies reused across requests
+* ability to import/export browser cookies later
+
+Suggested:
+
+```python
+import http.cookiejar
+
+cookie_jar = http.cookiejar.MozillaCookieJar("cookies.txt")
+
+opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(cookie_jar)
+)
+```
+
+All requests should use the opener object instead of raw `urlopen()`.
+
+Persist cookies between runs.
+
+---
+
+## 2 — Humanised Rate Limiting
+
+Current requests are too regular.
+
+Add:
+
+* random jitter
+* burst cooldowns
+* occasional longer pauses
+* adaptive slowdown mode
+
+Required behaviour examples:
+
+Per-request delay:
+
+```python
+time.sleep(random.uniform(2.5, 8.0))
+```
+
+Burst cooldown:
+
+```python
+if count % random.randint(15, 40) == 0:
+    time.sleep(random.uniform(90, 420))
+```
+
+Occasional random idle:
+
+```python
+if random.random() < 0.08:
+    time.sleep(random.uniform(20, 90))
+```
+
+Avoid perfect timing patterns.
+
+---
+
+## 3 — CAPTCHA Detection
+
+Add detection logic for:
+
+* redirects to captcha.photoshelter.com
+* HTML content instead of image/jpeg
+* unexpected content-types
+* unusual redirect chains
+
+If detected:
+
+* immediately pause queue
+* stop retries
+* enter cooldown mode
+* preserve session state
+
+DO NOT aggressively retry CAPTCHA-triggered requests.
+
+---
+
+## 4 — Queue Persistence
+
+Implement resumable queue system.
+
+Store:
+
+```json
+{
+  "id": "...",
+  "crop_downloaded": true,
+  "wm_downloaded": true,
+  "iptc_extracted": true,
+  "composited": true,
+  "last_attempt": "...",
+  "fail_count": 0
+}
+```
+
+Goals:
+
+* never re-download unnecessarily
+* survive interruptions
+* reduce repeated requests
+
+---
+
+##  5 — Reduce Predictable Behaviour
+
+Current request order is deterministic:
+
+1. crop
+2. wm
+3. next image
+
+Randomise ordering:
+
+```python
+tasks = [crop_url, wm_url]
+random.shuffle(tasks)
+```
+
+Add entropy wherever reasonable.
+
+---
+
+##  6 — Low Concurrency
+
+Keep concurrency extremely low.
+
+Recommended:
+
+* 1 request at a time
+* maximum 2 simultaneous requests
+
+Do NOT aggressively parallelise downloads.
+
+---
+
+##  7 — Local Cache Layer
+
+Cache:
+
+* downloaded renders
+* extracted IPTC
+* generated composites
+
+Never re-fetch existing successful assets unless forced.
+
+---
+
+## IMPORTANT ARCHITECTURAL DIRECTION
+
+
+The embedded IPTC extraction is now the preferred metadata source.
+
+Current local extraction:
+
+```python
+meta = extract_iptc(clean_bytes)
+```
+
+This is significantly safer than webpage scraping and should remain the primary metadata pipeline.
+
+---
+
+## TARGET FINAL ARCHITECTURE
+
+VISIBLE BROWSER
+
+* occasional session establishment only
+* manual CAPTCHA solving if required
+* exports cookies
+
+DOWNLOADER WORKER
+
+* consumes pre-known IDs
+* uses persistent cookies
+* direct img-get2 fetches only
+* local IPTC extraction
+* heavily rate limited
+* resumable queue
+* adaptive cooldowns
+
+Goal:
+Reduce behavioural bot fingerprinting while preserving:
+
+* image acquisition
+* IPTC metadata extraction
+* composite reconstruction
+* low failure rate
+* long-term operational stability
+
+
+***Priority/Task 2***
+some "crop" images are not complete we need to  detect the correct position on the full image to overlay
+Current behaviour incorrectly assumes:
+
+the cropped image is always aligned to the top-left of the original image
+the crop always retains full original width
+overlay position is always x=0, y=0
+
+This assumption is invalid.
+
+Some crops remove more content from the right side (and potentially left side), meaning the cropped image is offset within the original image dimensions.
+
+A fixed overlay therefore causes:
+
+misaligned faces
+duplicated edges
+visible seams
+incorrect crop placement
+
+The system must instead automatically detect the exact position of the cropped image inside the original image before compositing.
+
+Required behaviour:
+
+Treat the cropped image as a subsection/window extracted from the original image.
+Automatically locate where the cropped image exists within the larger image.
+Use the detected X/Y coordinates as the overlay origin.
+Perform overlay/compositing using those coordinates instead of 0,0.
+
+Recommended implementation:
+
+Use template matching.
+
+Process:
+
+Convert both images to grayscale.
+Run template matching using OpenCV.
+Find the highest-confidence match position.
+Use that position as the overlay offset.
+Composite overlay at detected coordinates.
+
+Example:
+
+Incorrect:
+overlayX = 0
+overlayY = 0
+
+Correct:
+overlayX = detectedMatchX
+overlayY = detectedMatchY
+
+Example result:
+overlayX = 148
+overlayY = 0
+
+Meaning:
+
+the crop begins 148px from the left edge
+overlay must start there
+
+Suggested OpenCV implementation:
+
+import cv2
+
+base = cv2.imread("base.jpg")
+overlay = cv2.imread("overlay.jpg")
+
+base_gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
+overlay_gray = cv2.cvtColor(overlay, cv2.COLOR_BGR2GRAY)
+
+result = cv2.matchTemplate(
+    base_gray,
+    overlay_gray,
+    cv2.TM_CCOEFF_NORMED
+)
+
+_, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+x, y = max_loc
+
+print("Best match:", x, y)
+print("Confidence:", max_val)
+
+Validation:
+
+Require confidence threshold around 0.95+
+Reject or log low-confidence matches
+
+Important assumptions:
+
+Both images must be rendered at identical scale
+Minor JPEG compression differences are acceptable
+No resizing should occur before matching
+
+Future-proofing:
+If future crops may include scaling, transforms, AI resizing, or rotation, migrate to feature matching methods such as:
+
+ORB
+SIFT
+AKAZE
+
+For the current use case, template matching is preferred because it is:
+
+simpler
+faster
+highly accurate for identical-scale crops
+
+Final required behaviour:
+
+Detect crop position automatically
+Calculate exact X/Y offset
+Overlay using detected coordinates
+Eliminate assumptions about left alignment or full-width crops
+
+
+
+
+
+
+
+***Priority/Task 3***
+To better support images with difficult aspect ratios, we are adding an additional overlay image layer.
+
+The overlay should use PhotoShelter smart-fill images (g=sm) to automatically centre the subject.
+
+Use these two overlay formats:
+
+Vertical overlay (portrait strip):
+https://m.psecn.photoshelter.com/img-get2/*IMAGE ID*/fill=440x2040/g=sm/FILENAME.jpg
+
+Horizontal overlay (landscape strip):
+https://m.psecn.photoshelter.com/img-get2/*IMAGE ID*/fill=2040x440/g=sm/FILENAME.jpg
+
+Notes:
+fill using 440 as either height or width will produce clean
+fill= scales the image into the requested dimensions max 2040
+g=sm applies PhotoShelter smart positioning to keep the subject centred.
+These are intended as centred overlay strips, not exact crops
+may need stretching/shrinking based on final image size.
+
+Autonomously complete required task.
